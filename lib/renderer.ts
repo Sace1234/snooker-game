@@ -201,12 +201,12 @@ function drawAim(
 
   // Aim line
   ctx.save();
-  ctx.setLineDash([5, 9]);
+  ctx.setLineDash([6, 8]);
   ctx.beginPath();
   ctx.moveTo(cx - nx * cueBall.radius, cy - ny * cueBall.radius);
   ctx.lineTo(mx, my);
-  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+  ctx.lineWidth = 1.5;
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.restore();
