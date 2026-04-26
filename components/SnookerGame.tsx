@@ -61,6 +61,11 @@ export default function SnookerGame() {
   const dragStartRef   = useRef({ clientX: 0, clientY: 0 });
   const lockedAimRef   = useRef({ x: 150, y: 300 });
 
+  // Touch-specific: hold timer fires after 150ms to enter charge mode
+  const holdTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chargeAnchorRef = useRef({ clientX: 0, clientY: 0 });
+  const touchPosRef     = useRef({ clientX: 0, clientY: 0 });
+
   const [ui, setUI] = useState<UISnap>(() => snap(gsRef.current));
   const [power, setPowerState] = useState(0);
   const [isCharging, setIsCharging] = useState(false);
@@ -218,18 +223,55 @@ export default function SnookerGame() {
     };
   }, [toVirtual, shoot]);
 
-  // ── Touch handlers (canvas-level is fine for touch) ───────────────────────
+  // ── Touch handlers ────────────────────────────────────────────────────────
+  // Two-phase touch: tap/slide freely aims the line (no shot), holding still
+  // for 150 ms locks the aim and enters charge mode — drag distance = power,
+  // lift = shoot.
+
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    const { x, y } = toVirtual(t.clientX, t.clientY);
+
+    // Always update free aim immediately
+    aimRef.current = { x, y };
+    touchPosRef.current = { clientX: t.clientX, clientY: t.clientY };
+
+    // Clear any in-progress charge
+    if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
+    isDraggingRef.current = false;
+    setIsCharging(false);
+    powerRef.current = 0;
+
+    const gs = gsRef.current;
+    if (gs.phase === 'aiming') {
+      // After 150 ms of holding, lock aim and enter charge mode
+      holdTimerRef.current = setTimeout(() => {
+        holdTimerRef.current = null;
+        lockedAimRef.current = { ...aimRef.current };
+        chargeAnchorRef.current = { ...touchPosRef.current };
+        isDraggingRef.current = true;
+        powerRef.current = 0;
+        setPowerState(0);
+        setIsCharging(true);
+      }, 150);
+    }
+  }, [toVirtual]);
 
   const handleTouchMove = useCallback((e: React.TouchEvent) => {
     e.preventDefault();
     const t = e.touches[0];
-    const { x, y } = toVirtual(t.clientX, t.clientY);
+    touchPosRef.current = { clientX: t.clientX, clientY: t.clientY };
+
     if (!isDraggingRef.current) {
+      // Free-aim phase: aim line follows finger
+      const { x, y } = toVirtual(t.clientX, t.clientY);
       aimRef.current = { x, y };
     } else {
+      // Charge phase: drag distance from anchor = power
       const dist = Math.hypot(
-        t.clientX - dragStartRef.current.clientX,
-        t.clientY - dragStartRef.current.clientY,
+        t.clientX - chargeAnchorRef.current.clientX,
+        t.clientY - chargeAnchorRef.current.clientY,
       );
       const p = Math.min(100, (dist / MAX_DRAG_PX) * 100);
       powerRef.current = p;
@@ -237,40 +279,12 @@ export default function SnookerGame() {
     }
   }, [toVirtual]);
 
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    const gs = gsRef.current;
-    if (gs.phase === 'aiming') {
-      lockedAimRef.current = { ...aimRef.current };
-      dragStartRef.current = { clientX: e.clientX, clientY: e.clientY };
-      isDraggingRef.current = true;
-      powerRef.current = 0;
-      setPowerState(0);
-      setIsCharging(true);
-    }
-  }, []);
-
-  const handleTouchStart = useCallback((e: React.TouchEvent) => {
-    e.preventDefault();
-    const t = e.touches[0];
-    const { x, y } = toVirtual(t.clientX, t.clientY);
-    aimRef.current = { x, y };
-
-    const gs = gsRef.current;
-    if (gs.phase === 'aiming') {
-      lockedAimRef.current = { x, y };
-      dragStartRef.current = { clientX: t.clientX, clientY: t.clientY };
-      isDraggingRef.current = true;
-      powerRef.current = 0;
-      setPowerState(0);
-      setIsCharging(true);
-    }
-  }, [toVirtual]);
-
-  // handleMouseUp is now on window — kept as no-op placeholder for canvas
-  const handleMouseUp = useCallback(() => {}, []);
-
   const handleTouchEnd = useCallback((e: React.TouchEvent) => {
     e.preventDefault();
+
+    // Always cancel any pending hold timer
+    if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
+
     const gs = gsRef.current;
 
     if (isDraggingRef.current) {
@@ -280,7 +294,7 @@ export default function SnookerGame() {
       if (p > 1) { shoot(p); return; }
     }
 
-    // Tap in placing mode
+    // Short tap — handle placing mode
     if (gs.phase === 'placing') {
       const { x, y } = aimRef.current;
       if (!isInD(x, y)) return;
@@ -296,6 +310,21 @@ export default function SnookerGame() {
       syncUI();
     }
   }, [shoot, syncUI]);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    const gs = gsRef.current;
+    if (gs.phase === 'aiming') {
+      lockedAimRef.current = { ...aimRef.current };
+      dragStartRef.current = { clientX: e.clientX, clientY: e.clientY };
+      isDraggingRef.current = true;
+      powerRef.current = 0;
+      setPowerState(0);
+      setIsCharging(true);
+    }
+  }, []);
+
+  // handleMouseUp is now on window — kept as no-op placeholder for canvas
+  const handleMouseUp = useCallback(() => {}, []);
 
   const handleClick = useCallback((e: React.MouseEvent) => {
     const gs = gsRef.current;
@@ -315,6 +344,11 @@ export default function SnookerGame() {
       syncUI();
     }
   }, [toVirtual, syncUI]);
+
+  // Clean up hold timer on unmount
+  useEffect(() => () => {
+    if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
+  }, []);
 
   const newFrame = useCallback(() => {
     gsRef.current = createInitialState();
@@ -454,7 +488,7 @@ export default function SnookerGame() {
         {/* Hint */}
         <div className="mt-1 text-[10px] text-gray-700 leading-none">
           {ui.phase === 'placing' && 'Click inside the D to place the cue ball'}
-          {ui.phase === 'aiming'  && 'Move mouse to aim · Hold & drag to charge · Release to shoot'}
+          {ui.phase === 'aiming'  && 'Aim with mouse/tap · Hold 150ms to lock & charge · Release to shoot'}
           {ui.phase === 'rolling' && 'Balls in motion…'}
           {ui.phase === 'over'    && 'Frame over · Click New Frame to play again'}
         </div>
