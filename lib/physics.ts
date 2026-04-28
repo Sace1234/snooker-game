@@ -4,6 +4,7 @@ import { TW, TH, FRICTION, MIN_V, RESTITUTION_C, RESTITUTION_B } from './constan
 export interface CollisionEvent {
   a: string;
   b: string;
+  speed: number; // relative speed along normal at impact
 }
 
 export interface StepResult {
@@ -97,7 +98,7 @@ export function stepPhysics(
         b.vy += imp * ny;
       }
 
-      collisions.push({ a: a.id, b: b.id });
+      collisions.push({ a: a.id, b: b.id, speed: Math.max(0, dot) });
     }
   }
 

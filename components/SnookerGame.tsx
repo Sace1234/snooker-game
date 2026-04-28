@@ -6,6 +6,7 @@ import { CAN_W, CAN_H, CW, MAX_SPEED, NUM_SUBSTEPS, POCKETS } from '@/lib/consta
 import { stepPhysics, allStopped } from '@/lib/physics';
 import { createInitialState, resolveShot, isInD } from '@/lib/rules';
 import { renderFrame } from '@/lib/renderer';
+import { playCueStrike, playBallHit, playPotted, playCushionHit } from '@/lib/sounds';
 
 interface UISnap {
   player: number;
@@ -21,15 +22,15 @@ interface UISnap {
 
 function snap(gs: GameState): UISnap {
   return {
-    player: gs.player,
-    scores: [...gs.scores] as [number, number],
-    ballOn: gs.ballOn,
+    player:   gs.player,
+    scores:   [...gs.scores] as [number, number],
+    ballOn:   gs.ballOn,
     redsLeft: gs.redsLeft,
-    msg: gs.msg,
-    foulMsg: gs.foulMsg,
-    phase: gs.phase,
-    over: gs.over,
-    winner: gs.winner,
+    msg:      gs.msg,
+    foulMsg:  gs.foulMsg,
+    phase:    gs.phase,
+    over:     gs.over,
+    winner:   gs.winner,
   };
 }
 
@@ -37,19 +38,15 @@ const BALL_ON_LABEL: Record<string, string> = {
   red: 'Red', any_color: 'Any Colour', yellow: 'Yellow',
   green: 'Green', brown: 'Brown', blue: 'Blue', pink: 'Pink', black: 'Black',
 };
-
 const BALL_ON_COLOR: Record<string, string> = {
   red: '#E74C3C', any_color: '#aaa', yellow: '#F4D03F',
   green: '#2ECC71', brown: '#8B5E3C', blue: '#3498DB',
   pink: '#E91E8C', black: '#bbb',
 };
 
-// Desktop drag-to-shoot: full power at this many CSS pixels of drag
-const MAX_DRAG_PX = 160;
-// How many radians per 50ms interval tick for aim rotation buttons
-const AIM_STEP = 0.018;
-// Milliseconds to go from 0 → 100% power when holding the SHOOT button
-const CHARGE_MS = 2200;
+const MAX_DRAG_PX  = 160;
+const AIM_STEP     = 0.018; // radians per 50 ms tick
+const CHARGE_MS    = 2200;  // ms to reach 100% power on SHOOT button
 
 export default function SnookerGame() {
   const canvasRef    = useRef<HTMLCanvasElement>(null);
@@ -58,63 +55,67 @@ export default function SnookerGame() {
   const rafRef       = useRef<number>(0);
   const scaleRef     = useRef(1);
 
-  // Aim & shoot state (kept in refs to avoid re-render overhead)
   const aimRef          = useRef({ x: 150, y: 300 });
   const powerRef        = useRef(0);
-  const isDraggingRef   = useRef(false);   // true while desktop drag or button charge active
+  const isDraggingRef   = useRef(false);
   const dragStartRef    = useRef({ clientX: 0, clientY: 0 });
   const lockedAimRef    = useRef({ x: 150, y: 300 });
 
-  // Zoom / pan — applied as CSS transform on the canvas element each frame
+  // Zoom / pan via CSS transform on canvas (transform-origin: center center)
   const zoomRef = useRef(1);
-  const panRef  = useRef({ x: 0, y: 0 }); // translate in container-px, origin = canvas top-left
+  const panRef  = useRef({ x: 0, y: 0 });
 
-  // Pinch-to-zoom tracking
+  // Pinch tracking — computed relative to container centre
   const pinchRef = useRef({
-    active: false,
-    startDist: 0,
+    active:    false,
+    startDist: 1,
     startZoom: 1,
-    midX: 0, // midpoint in container px
+    startPanX: 0,
+    startPanY: 0,
+    midX: 0,   // midpoint relative to container centre
     midY: 0,
   });
 
-  // Single-finger pan tracking
+  // Single-finger pan
   const panDragRef = useRef({
-    active: false,
-    moved:  false,
-    startClientX: 0,
-    startClientY: 0,
-    startPanX: 0,
-    startPanY: 0,
+    active: false, moved: false,
+    startClientX: 0, startClientY: 0,
+    startPanX: 0,   startPanY: 0,
   });
 
-  // Mobile aim-rotate button interval
-  const aimIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // Mobile shoot-button charge interval
+  const aimIntervalRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const chargeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const chargeStartRef    = useRef(0);
 
-  const [ui, setUI]             = useState<UISnap>(() => snap(gsRef.current));
-  const [power, setPowerState]  = useState(0);
+  const [ui, setUI]         = useState<UISnap>(() => snap(gsRef.current));
+  const [power, setPower]   = useState(0);
   const [isCharging, setIsCharging] = useState(false);
+
+  // Player names — shown in scoreboard, editable in pre-game screen
+  const [names, setNames]       = useState<[string, string]>(['Player 1', 'Player 2']);
+  const [nameInputs, setNameInputs] = useState<[string, string]>(['', '']);
+  const [showSetup, setShowSetup]   = useState(true);
 
   const syncUI = useCallback(() => setUI(snap(gsRef.current)), []);
 
-  // ── Canvas sizing ─────────────────────────────────────────────────────────
+  // ── Canvas sizing (fit-contain within container) ──────────────────────────
 
   const setupCanvas = useCallback(() => {
     const canvas    = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
     const cw  = container.clientWidth;
-    const ch  = (CAN_H / CAN_W) * cw;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.style.width  = `${cw}px`;
-    canvas.style.height = `${ch}px`;
-    canvas.width  = Math.round(cw * dpr);
-    canvas.height = Math.round(ch * dpr);
-    scaleRef.current = (cw / CAN_W) * dpr;
+    const ch  = container.clientHeight;
+    // Scale to fill as much of the container as possible while keeping aspect ratio
+    const scale = Math.min(cw / CAN_W, ch / CAN_H);
+    const cssW  = Math.floor(CAN_W * scale);
+    const cssH  = Math.floor(CAN_H * scale);
+    const dpr   = window.devicePixelRatio || 1;
+    canvas.style.width  = `${cssW}px`;
+    canvas.style.height = `${cssH}px`;
+    canvas.width  = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    scaleRef.current = scale * dpr;
   }, []);
 
   useEffect(() => {
@@ -125,8 +126,8 @@ export default function SnookerGame() {
   }, [setupCanvas]);
 
   // ── Coordinate conversion ─────────────────────────────────────────────────
-  // getBoundingClientRect() accounts for CSS transforms, so this works
-  // correctly at any zoom level.
+  // getBoundingClientRect accounts for CSS transforms automatically.
+
   const toVirtual = useCallback((clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
@@ -138,19 +139,22 @@ export default function SnookerGame() {
     };
   }, []);
 
-  // ── Zoom/pan helpers ─────────────────────────────────────────────────────
+  // ── Zoom / pan helpers ────────────────────────────────────────────────────
 
   const clampPan = useCallback(() => {
     const canvas    = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
     const z   = zoomRef.current;
-    const cw  = container.clientWidth;
-    const ch  = container.clientHeight;
-    const csW = parseFloat(canvas.style.width)  || cw;
-    const csH = parseFloat(canvas.style.height) || ch;
-    panRef.current.x = Math.min(0, Math.max(cw  - csW * z, panRef.current.x));
-    panRef.current.y = Math.min(0, Math.max(ch  - csH * z, panRef.current.y));
+    const csW = parseFloat(canvas.style.width)  || container.clientWidth;
+    const csH = parseFloat(canvas.style.height) || container.clientHeight;
+    const cW  = container.clientWidth;
+    const cH  = container.clientHeight;
+    // With transform-origin:center the pan range is ±(visualSize − containerSize)/2
+    const maxX = Math.max(0, (csW * z - cW) / 2);
+    const maxY = Math.max(0, (csH * z - cH) / 2);
+    panRef.current.x = Math.min(maxX, Math.max(-maxX, panRef.current.x));
+    panRef.current.y = Math.min(maxY, Math.max(-maxY, panRef.current.y));
   }, []);
 
   const applyTransform = useCallback(() => {
@@ -159,7 +163,7 @@ export default function SnookerGame() {
     const { x, y } = panRef.current;
     const z = zoomRef.current;
     canvas.style.transform       = `translate(${x}px,${y}px) scale(${z})`;
-    canvas.style.transformOrigin = '0 0';
+    canvas.style.transformOrigin = 'center center';
   }, []);
 
   // ── Shoot ─────────────────────────────────────────────────────────────────
@@ -176,6 +180,8 @@ export default function SnookerGame() {
     const dist = Math.hypot(dx, dy);
     if (dist < 1) return;
 
+    playCueStrike(shotPower / 100);
+
     const speed = (Math.max(1, shotPower) / 100) * MAX_SPEED;
     cue.vx = (dx / dist) * speed;
     cue.vy = (dy / dist) * speed;
@@ -185,7 +191,7 @@ export default function SnookerGame() {
     gs.pottedThisShot = [];
     gs.foulMsg        = '';
     powerRef.current  = 0;
-    setPowerState(0);
+    setPower(0);
     setIsCharging(false);
     isDraggingRef.current = false;
   }, []);
@@ -201,16 +207,28 @@ export default function SnookerGame() {
       if (gs.phase === 'rolling' && ctx) {
         for (let step = 0; step < NUM_SUBSTEPS; step++) {
           const { collisions, potted } = stepPhysics(gs.balls, POCKETS);
+
+          // Track first contact for rules
           if (!gs.firstContact) {
             for (const ev of collisions) {
               if (ev.a === 'cue') { gs.firstContact = ev.b; break; }
               if (ev.b === 'cue') { gs.firstContact = ev.a; break; }
             }
           }
+
+          // Accumulate potted
           for (const id of potted) {
             if (!gs.pottedThisShot.includes(id)) gs.pottedThisShot.push(id);
           }
+
+          // Sound: ball-ball collisions (limit to 3 loudest per step)
+          const sorted = [...collisions].sort((a, b) => b.speed - a.speed).slice(0, 3);
+          for (const ev of sorted) playBallHit(ev.speed);
+
+          // Sound: pots
+          for (const _ of potted) playPotted();
         }
+
         if (allStopped(gs.balls)) {
           resolveShot(gs);
           syncUI();
@@ -240,7 +258,7 @@ export default function SnookerGame() {
     return () => cancelAnimationFrame(rafRef.current);
   }, [syncUI, applyTransform]);
 
-  // ── Global mouse tracking (keeps desktop drag-to-shoot working) ───────────
+  // ── Global mouse tracking (desktop) ──────────────────────────────────────
 
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
@@ -254,7 +272,7 @@ export default function SnookerGame() {
         );
         const p = Math.min(100, (dist / MAX_DRAG_PX) * 100);
         powerRef.current = p;
-        setPowerState(Math.round(p));
+        setPower(Math.round(p));
       }
     };
     const onUp = () => {
@@ -282,7 +300,7 @@ export default function SnookerGame() {
       dragStartRef.current  = { clientX: e.clientX, clientY: e.clientY };
       isDraggingRef.current = true;
       powerRef.current      = 0;
-      setPowerState(0);
+      setPower(0);
       setIsCharging(true);
     }
   }, []);
@@ -301,45 +319,44 @@ export default function SnookerGame() {
       cue.x = x; cue.y = y; cue.potted = false; cue.vx = 0; cue.vy = 0;
       aimRef.current = { x: x + 200, y };
       gs.phase = 'aiming';
-      gs.msg   = `Player ${gs.player + 1} — aim and shoot`;
+      gs.msg   = `${names[gs.player]} — aim and shoot`;
       syncUI();
     }
-  }, [toVirtual, syncUI]);
+  }, [toVirtual, syncUI, names]);
 
-  // ── Touch handlers — canvas is zoom/pan only ──────────────────────────────
+  // ── Touch: canvas is zoom/pan only ───────────────────────────────────────
 
   const handleTouchStart = useCallback((e: React.TouchEvent) => {
     e.preventDefault();
 
     if (e.touches.length >= 2) {
-      // Two fingers → start pinch
-      const t0 = e.touches[0];
-      const t1 = e.touches[1];
+      const t0 = e.touches[0], t1 = e.touches[1];
       const container = containerRef.current;
-      const rect = container?.getBoundingClientRect();
+      const rect      = container?.getBoundingClientRect();
       const midClientX = (t0.clientX + t1.clientX) / 2;
       const midClientY = (t0.clientY + t1.clientY) / 2;
+      // Midpoint relative to container centre (needed for zoom-toward-point)
+      const cW = container?.clientWidth  ?? 0;
+      const cH = container?.clientHeight ?? 0;
       pinchRef.current = {
         active:    true,
         startDist: Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY),
         startZoom: zoomRef.current,
-        midX: rect ? midClientX - rect.left : midClientX,
-        midY: rect ? midClientY - rect.top  : midClientY,
+        startPanX: panRef.current.x,
+        startPanY: panRef.current.y,
+        midX: rect ? midClientX - rect.left - cW / 2 : 0,
+        midY: rect ? midClientY - rect.top  - cH / 2 : 0,
       };
       panDragRef.current.active = false;
       return;
     }
 
-    // One finger
     pinchRef.current.active = false;
     const t = e.touches[0];
     panDragRef.current = {
-      active:       true,
-      moved:        false,
-      startClientX: t.clientX,
-      startClientY: t.clientY,
-      startPanX:    panRef.current.x,
-      startPanY:    panRef.current.y,
+      active: true, moved: false,
+      startClientX: t.clientX, startClientY: t.clientY,
+      startPanX: panRef.current.x, startPanY: panRef.current.y,
     };
   }, []);
 
@@ -347,16 +364,15 @@ export default function SnookerGame() {
     e.preventDefault();
 
     if (e.touches.length >= 2 && pinchRef.current.active) {
-      const t0 = e.touches[0];
-      const t1 = e.touches[1];
-      const newDist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
-      const rawZoom = pinchRef.current.startZoom * (newDist / pinchRef.current.startDist);
-      const newZoom = Math.min(4, Math.max(1, rawZoom));
-      const ratio   = newZoom / zoomRef.current;
-      const { midX, midY } = pinchRef.current;
+      const t0 = e.touches[0], t1 = e.touches[1];
+      const curDist  = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+      const { startDist, startZoom, startPanX, startPanY, midX, midY } = pinchRef.current;
+      const newZoom  = Math.min(4, Math.max(1, startZoom * curDist / startDist));
+      const r        = newZoom / startZoom;
+      // Zoom toward the pinch midpoint (relative to container centre)
       panRef.current = {
-        x: midX - (midX - panRef.current.x) * ratio,
-        y: midY - (midY - panRef.current.y) * ratio,
+        x: midX * (1 - r) + startPanX * r,
+        y: midY * (1 - r) + startPanY * r,
       };
       zoomRef.current = newZoom;
       clampPan();
@@ -382,7 +398,7 @@ export default function SnookerGame() {
     e.preventDefault();
 
     if (e.touches.length > 0) {
-      // Still some fingers down — transition pinch → pan
+      // Remaining fingers — transition from pinch back to pan
       pinchRef.current.active = false;
       if (e.touches.length === 1) {
         const t = e.touches[0];
@@ -397,7 +413,7 @@ export default function SnookerGame() {
 
     pinchRef.current.active = false;
 
-    // Short tap (no movement) in placing mode → place ball
+    // Short tap in placing mode → place ball
     const drag = panDragRef.current;
     const gs   = gsRef.current;
     if (!drag.moved && gs.phase === 'placing') {
@@ -412,14 +428,14 @@ export default function SnookerGame() {
             cue.x = x; cue.y = y; cue.potted = false; cue.vx = 0; cue.vy = 0;
             aimRef.current = { x: x + 200, y };
             gs.phase = 'aiming';
-            gs.msg   = `Player ${gs.player + 1} — aim and shoot`;
+            gs.msg   = `${names[gs.player]} — aim and shoot`;
             syncUI();
           }
         }
       }
     }
     panDragRef.current.active = false;
-  }, [toVirtual, syncUI]);
+  }, [toVirtual, syncUI, names]);
 
   // ── Aim rotation buttons ──────────────────────────────────────────────────
 
@@ -429,10 +445,8 @@ export default function SnookerGame() {
     const cue = gs.balls.find(b => b.id === 'cue');
     if (!cue) return;
     const aim   = aimRef.current;
-    const dx    = aim.x - cue.x;
-    const dy    = aim.y - cue.y;
-    const angle = Math.atan2(dy, dx) + delta;
-    const dist  = Math.max(Math.hypot(dx, dy), 80);
+    const angle = Math.atan2(aim.y - cue.y, aim.x - cue.x) + delta;
+    const dist  = Math.max(Math.hypot(aim.x - cue.x, aim.y - cue.y), 80);
     aimRef.current = {
       x: cue.x + Math.cos(angle) * dist,
       y: cue.y + Math.sin(angle) * dist,
@@ -446,13 +460,10 @@ export default function SnookerGame() {
   }, [rotateAim]);
 
   const stopAimRotate = useCallback(() => {
-    if (aimIntervalRef.current) {
-      clearInterval(aimIntervalRef.current);
-      aimIntervalRef.current = null;
-    }
+    if (aimIntervalRef.current) { clearInterval(aimIntervalRef.current); aimIntervalRef.current = null; }
   }, []);
 
-  // ── Shoot button (mobile charge-to-shoot) ─────────────────────────────────
+  // ── Shoot button (mobile) ─────────────────────────────────────────────────
 
   const startShootCharge = useCallback(() => {
     const gs = gsRef.current;
@@ -461,22 +472,18 @@ export default function SnookerGame() {
     lockedAimRef.current  = { ...aimRef.current };
     isDraggingRef.current = true;
     powerRef.current      = 0;
-    setPowerState(0);
+    setPower(0);
     setIsCharging(true);
     chargeStartRef.current = Date.now();
     chargeIntervalRef.current = setInterval(() => {
-      const elapsed = Date.now() - chargeStartRef.current;
-      const p = Math.min(100, (elapsed / CHARGE_MS) * 100);
+      const p = Math.min(100, ((Date.now() - chargeStartRef.current) / CHARGE_MS) * 100);
       powerRef.current = p;
-      setPowerState(Math.round(p));
+      setPower(Math.round(p));
     }, 16);
   }, []);
 
   const releaseShoot = useCallback(() => {
-    if (chargeIntervalRef.current) {
-      clearInterval(chargeIntervalRef.current);
-      chargeIntervalRef.current = null;
-    }
+    if (chargeIntervalRef.current) { clearInterval(chargeIntervalRef.current); chargeIntervalRef.current = null; }
     if (!isDraggingRef.current) return;
     const p = powerRef.current;
     isDraggingRef.current = false;
@@ -497,10 +504,19 @@ export default function SnookerGame() {
     isDraggingRef.current = false;
     zoomRef.current       = 1;
     panRef.current        = { x: 0, y: 0 };
-    setPowerState(0);
+    setPower(0);
     setIsCharging(false);
     syncUI();
   }, [syncUI]);
+
+  // ── Name setup submission ─────────────────────────────────────────────────
+
+  const submitNames = useCallback(() => {
+    const n1 = nameInputs[0].trim() || 'Player 1';
+    const n2 = nameInputs[1].trim() || 'Player 2';
+    setNames([n1, n2]);
+    setShowSetup(false);
+  }, [nameInputs]);
 
   // ── UI ────────────────────────────────────────────────────────────────────
 
@@ -512,40 +528,73 @@ export default function SnookerGame() {
   return (
     <div className="flex flex-col h-screen bg-[#0A0A0A] text-white select-none overflow-hidden">
 
+      {/* ── Pre-game name setup overlay ────────────────────────────────── */}
+      {showSetup && (
+        <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-6">
+          <div className="bg-[#111] border border-[#2a2a2a] rounded-2xl p-8 w-full max-w-sm shadow-2xl">
+            <div className="text-center mb-6">
+              <div className="text-[10px] tracking-[0.4em] text-green-600 uppercase font-semibold mb-1">Snooker</div>
+              <h1 className="text-2xl font-bold text-white">Enter Player Names</h1>
+            </div>
+            <div className="space-y-4 mb-8">
+              <div>
+                <label className="block text-[11px] text-gray-500 uppercase tracking-wider mb-1.5">Player 1</label>
+                <input
+                  className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-green-700 text-sm"
+                  placeholder="Player 1"
+                  value={nameInputs[0]}
+                  maxLength={20}
+                  onChange={e => setNameInputs([e.target.value, nameInputs[1]])}
+                  onKeyDown={e => e.key === 'Enter' && submitNames()}
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 uppercase tracking-wider mb-1.5">Player 2</label>
+                <input
+                  className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-green-700 text-sm"
+                  placeholder="Player 2"
+                  value={nameInputs[1]}
+                  maxLength={20}
+                  onChange={e => setNameInputs([nameInputs[0], e.target.value])}
+                  onKeyDown={e => e.key === 'Enter' && submitNames()}
+                />
+              </div>
+            </div>
+            <button
+              onClick={submitNames}
+              className="w-full py-3 rounded-xl bg-green-800 hover:bg-green-700 active:bg-green-900 transition-colors text-white font-bold text-sm tracking-wide"
+            >
+              Start Game
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── Scoreboard ──────────────────────────────────────────────────── */}
       <div className="flex-none flex items-stretch bg-[#0D0D0D] border-b-2 border-[#1A1A1A]">
 
         {/* Player 1 */}
         <div className={`flex-1 flex items-center gap-3 px-4 py-2 transition-all
           ${p1Active ? 'bg-[#0F2A16] border-r-2 border-green-700' : 'border-r border-[#1A1A1A] opacity-60'}`}>
-          <div className={`w-3 h-3 rounded-full shrink-0 transition-all
+          <div className={`w-3 h-3 rounded-full shrink-0
             ${p1Active ? 'bg-green-400 shadow-[0_0_8px_#4ade80]' : 'bg-gray-700'}`} />
-          <div>
-            <div className="text-[10px] tracking-[0.25em] text-gray-500 uppercase font-medium">Player 1</div>
-            <div className="text-4xl font-bold tabular-nums leading-none text-white">{ui.scores[0]}</div>
+          <div className="min-w-0">
+            <div className="text-[10px] tracking-[0.2em] text-gray-500 uppercase font-medium truncate">{names[0]}</div>
+            <div className="text-4xl font-bold tabular-nums leading-none">{ui.scores[0]}</div>
           </div>
-          {p1Active && (
-            <div className="ml-auto text-[10px] text-green-400 font-semibold tracking-wider uppercase">
-              YOUR TURN
-            </div>
-          )}
+          {p1Active && <div className="ml-auto text-[10px] text-green-400 font-semibold tracking-wider uppercase shrink-0">YOUR TURN</div>}
         </div>
 
         {/* Centre */}
-        <div className="flex-none flex flex-col items-center justify-center px-5 py-2 gap-1 border-x border-[#222]">
+        <div className="flex-none flex flex-col items-center justify-center px-4 py-2 gap-1 border-x border-[#222]">
           <div className="text-[9px] tracking-[0.35em] text-gray-600 uppercase font-semibold">Snooker</div>
-          <div className="flex items-center gap-2">
-            <span
-              className="text-xs font-bold px-2 py-0.5 rounded-full border"
-              style={{
-                color: ballColor,
-                borderColor: `${ballColor}55`,
-                background:  `${ballColor}15`,
-              }}
-            >
-              {BALL_ON_LABEL[ui.ballOn] ?? ui.ballOn}
-            </span>
-          </div>
+          <span
+            className="text-xs font-bold px-2 py-0.5 rounded-full border"
+            style={{ color: ballColor, borderColor: `${ballColor}55`, background: `${ballColor}15` }}
+          >
+            {BALL_ON_LABEL[ui.ballOn] ?? ui.ballOn}
+          </span>
           <div className="text-[10px] text-gray-600">
             {ui.redsLeft > 0 ? `${ui.redsLeft} red${ui.redsLeft !== 1 ? 's' : ''}` : 'Colours'}
           </div>
@@ -554,26 +603,23 @@ export default function SnookerGame() {
         {/* Player 2 */}
         <div className={`flex-1 flex items-center justify-end gap-3 px-4 py-2 transition-all
           ${p2Active ? 'bg-[#0F2A16] border-l-2 border-green-700' : 'border-l border-[#1A1A1A] opacity-60'}`}>
-          {p2Active && (
-            <div className="mr-auto text-[10px] text-green-400 font-semibold tracking-wider uppercase">
-              YOUR TURN
-            </div>
-          )}
-          <div className="text-right">
-            <div className="text-[10px] tracking-[0.25em] text-gray-500 uppercase font-medium">Player 2</div>
-            <div className="text-4xl font-bold tabular-nums leading-none text-white">{ui.scores[1]}</div>
+          {p2Active && <div className="mr-auto text-[10px] text-green-400 font-semibold tracking-wider uppercase shrink-0">YOUR TURN</div>}
+          <div className="text-right min-w-0">
+            <div className="text-[10px] tracking-[0.2em] text-gray-500 uppercase font-medium truncate">{names[1]}</div>
+            <div className="text-4xl font-bold tabular-nums leading-none">{ui.scores[1]}</div>
           </div>
-          <div className={`w-3 h-3 rounded-full shrink-0 transition-all
+          <div className={`w-3 h-3 rounded-full shrink-0
             ${p2Active ? 'bg-green-400 shadow-[0_0_8px_#4ade80]' : 'bg-gray-700'}`} />
         </div>
       </div>
 
       {/* ── Canvas ──────────────────────────────────────────────────────── */}
-      {/* overflow-hidden clips the scaled canvas; relative so absolute children work */}
-      <div ref={containerRef} className="flex-1 min-h-0 overflow-hidden relative bg-[#060606]">
+      {/* flex-centering keeps canvas fully visible; overflow-hidden clips zoom overflow */}
+      <div ref={containerRef}
+        className="flex-1 min-h-0 overflow-hidden bg-[#060606] flex items-center justify-center">
         <canvas
           ref={canvasRef}
-          className="absolute top-0 left-0 touch-none cursor-crosshair"
+          className="touch-none cursor-crosshair block"
           style={{ display: 'block' }}
           onMouseDown={handleMouseDown}
           onClick={handleClick}
@@ -591,20 +637,18 @@ export default function SnookerGame() {
           <div className="text-xs min-h-[16px]">
             {ui.foulMsg
               ? <span className="text-red-400 font-semibold">{ui.foulMsg}</span>
-              : <span className="text-gray-400">{ui.msg}</span>
-            }
+              : <span className="text-gray-400">{ui.msg}</span>}
           </div>
           {ui.over && (
             <span className="text-sm font-bold text-yellow-400">
-              {ui.winner !== null ? `🏆 Player ${ui.winner + 1} wins!` : 'Draw!'}
+              {ui.winner !== null ? `🏆 ${names[ui.winner]} wins!` : 'Draw!'}
             </span>
           )}
         </div>
 
-        {/* Aim controls + power bar + shoot button */}
+        {/* Controls row */}
         <div className="flex items-center gap-2">
 
-          {/* Aim rotate buttons (always visible in aiming phase) */}
           {isAiming && (
             <div className="flex gap-1 shrink-0">
               <button
@@ -632,25 +676,19 @@ export default function SnookerGame() {
                 className="h-full rounded-full transition-none"
                 style={{
                   width: `${power}%`,
-                  background: power < 40
-                    ? '#22c55e'
-                    : power < 70
-                    ? '#eab308'
-                    : '#ef4444',
+                  background: power < 40 ? '#22c55e' : power < 70 ? '#eab308' : '#ef4444',
                 }}
               />
             </div>
             <span className="text-xs text-gray-500 w-8 text-right tabular-nums">{power}%</span>
           </div>
 
-          {/* Shoot button */}
           {isAiming && (
             <button
               className={`w-16 h-12 rounded-xl border font-bold text-sm shrink-0 select-none transition-colors
                 ${isCharging
                   ? 'bg-red-900 border-red-500 text-red-200 shadow-[0_0_14px_#ef444488]'
-                  : 'bg-[#1A1A1A] border-[#333] text-gray-200 active:bg-[#2A2A2A]'
-                }`}
+                  : 'bg-[#1A1A1A] border-[#333] text-gray-200 active:bg-[#2A2A2A]'}`}
               onPointerDown={startShootCharge}
               onPointerUp={releaseShoot}
               onPointerLeave={releaseShoot}
@@ -660,7 +698,6 @@ export default function SnookerGame() {
             </button>
           )}
 
-          {/* New Frame button when not aiming */}
           {!isAiming && (
             <button
               onClick={newFrame}
@@ -671,7 +708,7 @@ export default function SnookerGame() {
           )}
         </div>
 
-        {/* Hint row */}
+        {/* Hint + new-frame when aiming */}
         <div className="mt-1.5 flex items-center justify-between gap-2">
           <div className="text-[10px] text-gray-700 leading-none">
             {ui.phase === 'placing' && 'Tap inside the D to place the cue ball · Pinch to zoom'}
@@ -682,7 +719,7 @@ export default function SnookerGame() {
           {isAiming && (
             <button
               onClick={newFrame}
-              className="px-2 py-0.5 text-[10px] rounded bg-[#1A1A1A] hover:bg-[#2A2A2A] transition-colors border border-[#2A2A2A] text-gray-500 shrink-0"
+              className="px-2 py-0.5 text-[10px] rounded bg-[#1A1A1A] hover:bg-[#2A2A2A] border border-[#2A2A2A] text-gray-500 shrink-0"
             >
               New Frame
             </button>
