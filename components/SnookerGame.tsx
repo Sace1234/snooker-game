@@ -7,6 +7,17 @@ import { stepPhysics, allStopped } from '@/lib/physics';
 import { createInitialState, resolveShot, isInD } from '@/lib/rules';
 import { renderFrame } from '@/lib/renderer';
 import { playCueStrike, playBallHit, playPotted, playCushionHit } from '@/lib/sounds';
+import { supabase } from '@/lib/supabase';
+
+interface GameUser {
+  id: string;
+  username: string;
+}
+
+interface Props {
+  user: GameUser;
+  onSignOut: () => void;
+}
 
 interface UISnap {
   player: number;
@@ -48,7 +59,7 @@ const MAX_DRAG_PX  = 160;
 const AIM_STEP     = 0.018; // radians per 50 ms tick
 const CHARGE_MS    = 2200;  // ms to reach 100% power on SHOOT button
 
-export default function SnookerGame() {
+export default function SnookerGame({ user, onSignOut }: Props) {
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const gsRef        = useRef<GameState>(createInitialState());
@@ -86,14 +97,15 @@ export default function SnookerGame() {
   const aimIntervalRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const chargeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const chargeStartRef    = useRef(0);
+  const frameSavedRef     = useRef(false); // prevents double-save per frame
 
   const [ui, setUI]         = useState<UISnap>(() => snap(gsRef.current));
   const [power, setPower]   = useState(0);
   const [isCharging, setIsCharging] = useState(false);
 
-  // Player names — shown in scoreboard, editable in pre-game screen
-  const [names, setNames]       = useState<[string, string]>(['Player 1', 'Player 2']);
-  const [nameInputs, setNameInputs] = useState<[string, string]>(['', '']);
+  // Player names — player 1 defaults to their account username
+  const [names, setNames]       = useState<[string, string]>([user.username, 'Player 2']);
+  const [nameInputs, setNameInputs] = useState<[string, string]>([user.username, '']);
   const [showSetup, setShowSetup]   = useState(true);
 
   const syncUI = useCallback(() => setUI(snap(gsRef.current)), []);
@@ -196,6 +208,26 @@ export default function SnookerGame() {
     isDraggingRef.current = false;
   }, []);
 
+  // ── Save completed frame to Supabase ─────────────────────────────────────
+
+  const saveFrame = useCallback(async (
+    scores: [number, number],
+    winner: number | null,
+  ) => {
+    try {
+      await supabase.from('frames').insert({
+        player1_id:    user.id,
+        player1_name:  names[0],
+        player2_name:  names[1],
+        player1_score: scores[0],
+        player2_score: scores[1],
+        winner: winner === 0 ? 'player1' : winner === 1 ? 'player2' : 'draw',
+      });
+    } catch {
+      // Silent — don't interrupt the game if save fails
+    }
+  }, [user.id, names]);
+
   // ── Game loop ─────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -232,6 +264,10 @@ export default function SnookerGame() {
         if (allStopped(gs.balls)) {
           resolveShot(gs);
           syncUI();
+          if (gs.over && !frameSavedRef.current) {
+            frameSavedRef.current = true;
+            saveFrame(gs.scores, gs.winner);
+          }
         }
       }
 
@@ -256,7 +292,7 @@ export default function SnookerGame() {
     };
     rafRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [syncUI, applyTransform]);
+  }, [syncUI, applyTransform, saveFrame]);
 
   // ── Global mouse tracking (desktop) ──────────────────────────────────────
 
@@ -504,6 +540,7 @@ export default function SnookerGame() {
     isDraggingRef.current = false;
     zoomRef.current       = 1;
     panRef.current        = { x: 0, y: 0 };
+    frameSavedRef.current = false;
     setPower(0);
     setIsCharging(false);
     syncUI();
@@ -598,6 +635,12 @@ export default function SnookerGame() {
           <div className="text-[10px] text-gray-600">
             {ui.redsLeft > 0 ? `${ui.redsLeft} red${ui.redsLeft !== 1 ? 's' : ''}` : 'Colours'}
           </div>
+          <button
+            onClick={onSignOut}
+            className="text-[9px] text-gray-700 hover:text-gray-400 transition-colors mt-0.5"
+          >
+            sign out
+          </button>
         </div>
 
         {/* Player 2 */}
