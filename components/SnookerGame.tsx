@@ -15,8 +15,9 @@ interface GameUser {
 }
 
 interface Props {
-  user: GameUser;
+  user: GameUser | null;
   onSignOut: () => void;
+  onShowAuth: () => void;
 }
 
 interface UISnap {
@@ -59,7 +60,7 @@ const MAX_DRAG_PX  = 160;
 const AIM_STEP     = 0.018; // radians per 50 ms tick
 const CHARGE_MS    = 2200;  // ms to reach 100% power on SHOOT button
 
-export default function SnookerGame({ user, onSignOut }: Props) {
+export default function SnookerGame({ user, onSignOut, onShowAuth }: Props) {
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const gsRef        = useRef<GameState>(createInitialState());
@@ -103,9 +104,9 @@ export default function SnookerGame({ user, onSignOut }: Props) {
   const [power, setPower]   = useState(0);
   const [isCharging, setIsCharging] = useState(false);
 
-  // Player names — player 1 defaults to their account username
-  const [names, setNames]       = useState<[string, string]>([user.username, 'Player 2']);
-  const [nameInputs, setNameInputs] = useState<[string, string]>([user.username, '']);
+  // Player names — player 1 defaults to account username if signed in
+  const [names, setNames]       = useState<[string, string]>([user?.username ?? 'Player 1', 'Player 2']);
+  const [nameInputs, setNameInputs] = useState<[string, string]>([user?.username ?? 'Player 1', '']);
   const [showSetup, setShowSetup]   = useState(true);
 
   const syncUI = useCallback(() => setUI(snap(gsRef.current)), []);
@@ -214,6 +215,7 @@ export default function SnookerGame({ user, onSignOut }: Props) {
     scores: [number, number],
     winner: number | null,
   ) => {
+    if (!user) return; // guest — don't save
     try {
       await supabase.from('frames').insert({
         player1_id:    user.id,
@@ -226,7 +228,7 @@ export default function SnookerGame({ user, onSignOut }: Props) {
     } catch {
       // Silent — don't interrupt the game if save fails
     }
-  }, [user.id, names]);
+  }, [user, names]);
 
   // ── Game loop ─────────────────────────────────────────────────────────────
 
@@ -635,12 +637,21 @@ export default function SnookerGame({ user, onSignOut }: Props) {
           <div className="text-[10px] text-gray-600">
             {ui.redsLeft > 0 ? `${ui.redsLeft} red${ui.redsLeft !== 1 ? 's' : ''}` : 'Colours'}
           </div>
-          <button
-            onClick={onSignOut}
-            className="text-[9px] text-gray-700 hover:text-gray-400 transition-colors mt-0.5"
-          >
-            sign out
-          </button>
+          {user ? (
+            <button
+              onClick={onSignOut}
+              className="text-[9px] text-gray-700 hover:text-gray-400 transition-colors mt-0.5"
+            >
+              sign out
+            </button>
+          ) : (
+            <button
+              onClick={onShowAuth}
+              className="text-[9px] text-green-800 hover:text-green-500 transition-colors mt-0.5 font-semibold"
+            >
+              sign in to save
+            </button>
+          )}
         </div>
 
         {/* Player 2 */}

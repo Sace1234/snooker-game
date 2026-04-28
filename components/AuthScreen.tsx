@@ -5,9 +5,10 @@ import { supabase } from '@/lib/supabase';
 
 interface Props {
   onSuccess: () => void;
+  onClose?: () => void;
 }
 
-export default function AuthScreen({ onSuccess }: Props) {
+export default function AuthScreen({ onSuccess, onClose }: Props) {
   const [mode, setMode]         = useState<'signin' | 'signup'>('signin');
   const [email, setEmail]       = useState('');
   const [password, setPassword] = useState('');
@@ -83,9 +84,8 @@ export default function AuthScreen({ onSuccess }: Props) {
     setLoading(false);
   };
 
-  return (
-    <div className="flex items-center justify-center min-h-screen bg-[#0A0A0A] p-6">
-      <div className="w-full max-w-sm">
+  const inner = (
+    <div className="w-full max-w-sm">
 
         {/* Header */}
         <div className="text-center mb-8">
@@ -202,6 +202,33 @@ export default function AuthScreen({ onSuccess }: Props) {
           Your data is stored securely in Supabase.
         </p>
       </div>
+  );
+
+  if (onClose) {
+    return (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/70 backdrop-blur-sm"
+        onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      >
+        <div className="relative w-full max-w-sm">
+          <button
+            onClick={onClose}
+            className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-[#1a1a1a] border border-[#333] text-gray-400 hover:text-white flex items-center justify-center text-lg leading-none z-10"
+            aria-label="Close"
+          >
+            ×
+          </button>
+          <div className="bg-[#0A0A0A] rounded-2xl border border-[#222] p-6">
+            {inner}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center justify-center min-h-screen bg-[#0A0A0A] p-6">
+      {inner}
     </div>
   );
 }

@@ -7,9 +7,10 @@ import SnookerGame from '@/components/SnookerGame';
 import AuthScreen from '@/components/AuthScreen';
 
 export default function Home() {
-  const [user, setUser]       = useState<User | null>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [user, setUser]         = useState<User | null>(null);
+  const [profile, setProfile]   = useState<Profile | null>(null);
+  const [loading, setLoading]   = useState(true);
+  const [showAuth, setShowAuth] = useState(false);
 
   const fetchProfile = useCallback(async (userId: string) => {
     const { data } = await supabase
@@ -22,7 +23,6 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    // Check for an existing session on first load
     supabase.auth.getSession().then(({ data: { session } }) => {
       const u = session?.user ?? null;
       setUser(u);
@@ -30,12 +30,11 @@ export default function Home() {
       else setLoading(false);
     });
 
-    // Keep state in sync with Supabase auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (_event, session) => {
         const u = session?.user ?? null;
         setUser(u);
-        if (u) fetchProfile(u.id);
+        if (u) { fetchProfile(u.id); setShowAuth(false); }
         else { setProfile(null); setLoading(false); }
       },
     );
@@ -55,14 +54,21 @@ export default function Home() {
     );
   }
 
-  if (!user || !profile) {
-    return <AuthScreen onSuccess={() => {}} />;
-  }
+  const gameUser = user && profile ? { id: user.id, username: profile.username } : null;
 
   return (
-    <SnookerGame
-      user={{ id: user.id, username: profile.username }}
-      onSignOut={handleSignOut}
-    />
+    <>
+      <SnookerGame
+        user={gameUser}
+        onSignOut={handleSignOut}
+        onShowAuth={() => setShowAuth(true)}
+      />
+      {showAuth && (
+        <AuthScreen
+          onSuccess={() => setShowAuth(false)}
+          onClose={() => setShowAuth(false)}
+        />
+      )}
+    </>
   );
 }
